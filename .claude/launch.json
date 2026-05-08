@@ -1,0 +1,53 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Full Stack (docker-compose)",
+      "runtimeExecutable": "docker-compose",
+      "runtimeArgs": ["up", "--build"],
+      "port": 8001
+    },
+    {
+      "name": "Transaction Service",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--app-dir", "services/transaction"],
+      "port": 8001
+    },
+    {
+      "name": "Risk Service",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8002", "--reload", "--app-dir", "services/risk"],
+      "port": 8002
+    },
+    {
+      "name": "Notification Service",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8003", "--reload", "--app-dir", "services/notification"],
+      "port": 8003
+    },
+    {
+      "name": "Analytics Service",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8004", "--reload", "--app-dir", "services/analytics"],
+      "port": 8004
+    },
+    {
+      "name": "Chaos Agent",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8005", "--reload", "--app-dir", "chaos_agent"],
+      "port": 8005
+    },
+    {
+      "name": "Anomaly Detector (ML)",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8006", "--reload", "--app-dir", "ml"],
+      "port": 8006
+    },
+    {
+      "name": "Healing Agent",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["main:app", "--host", "0.0.0.0", "--port", "8007", "--reload", "--app-dir", "healing_agent"],
+      "port": 8007
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+# prometheus.yml – Prometheus Scrape Configuration
+#
+# WHY this config?
+#   Prometheus is a "pull" based system: it visits each service's
+#   /metrics endpoint on a schedule and stores the returned data.
+#
+#   Each job = one scrape target group.
+#   `scrape_interval: 15s` means we collect a metric snapshot
+#   every 15 seconds — enough resolution to catch anomalies fast.
+#
+# After running docker-compose up:
+#   Visit http://localhost:9090 → Status → Targets
+#   All targets should show state = UP
+
+global:
+  scrape_interval: 15s       # How often to scrape
+  evaluation_interval: 15s   # How often to evaluate alerting rules
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'transaction-service'
+    static_configs:
+      - targets: ['transaction:8001']
+    metrics_path: '/metrics'
+
+  - job_name: 'risk-service'
+    static_configs:
+      - targets: ['risk:8002']
+    metrics_path: '/metrics'
+
+  - job_name: 'notification-service'
+    static_configs:
+      - targets: ['notification:8003']
+    metrics_path: '/metrics'
+
+  - job_name: 'analytics-service'
+    static_configs:
+      - targets: ['analytics:8004']
+    metrics_path: '/metrics'
+
+  - job_name: 'chaos-agent'
+    static_configs:
+      - targets: ['chaos-agent:8005']
+    metrics_path: '/metrics'
+
+  - job_name: 'anomaly-detector'
+    static_configs:
+      - targets: ['anomaly-detector:8006']
+    metrics_path: '/metrics'
+
+  - job_name: 'healing-agent'
+    static_configs:
+      - targets: ['healing-agent:8007']
+    metrics_path: '/metrics'
+
+  # cAdvisor: per-container CPU, memory, network I/O
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metrics_path: '/metrics'
+
+  # kafka-exporter: consumer group lag, topic message rates
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+    metrics_path: '/metrics'

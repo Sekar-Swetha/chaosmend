@@ -1,0 +1,332 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────
+# WHY docker-compose?
+#   Single command (`docker-compose up -d`) boots
+#   the entire platform: DB, message bus, all 4
+#   microservices, chaos agent, ML detector,
+#   healer, Prometheus, and Grafana.
+#   Every service lives in the same `chaosmend`
+#   Docker network so they resolve each other by
+#   service name (e.g. `kafka:9092`).
+# ─────────────────────────────────────────────
+
+networks:
+  chaosmend:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+
+  # ──────────────────────────────────────────
+  # INFRASTRUCTURE LAYER
+  # ──────────────────────────────────────────
+
+  # Zookeeper: Kafka's coordination service.
+  # Kafka uses it to track which brokers are
+  # alive and who owns which partition.
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    networks: [chaosmend]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka: Our async message bus.
+  # Services publish events (e.g. transaction.created)
+  # and other services subscribe. This decouples them —
+  # the transaction service doesn't know or care what
+  # the risk service does with the event.
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    networks: [chaosmend]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # PostgreSQL: Relational DB for transactions,
+  # anomalies, and healing history.
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    networks: [chaosmend]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: chaosmend
+      POSTGRES_PASSWORD: chaosmend_secret
+      POSTGRES_DB: chaosmend
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chaosmend"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka UI: A nice browser interface to inspect
+  # topics, messages, and consumer groups.
+  # Visit http://localhost:8080 after startup.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: chaosmend
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ──────────────────────────────────────────
+  # APPLICATION LAYER – Core Microservices
+  # ──────────────────────────────────────────
+
+  # Transaction Service: The entry point.
+  # Clients POST transactions here. The service
+  # saves to Postgres and publishes to Kafka.
+  transaction:
+    build: ./services/transaction
+    container_name: transaction
+    networks: [chaosmend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://chaosmend:chaosmend_secret@postgres:5432/chaosmend
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SERVICE_NAME: transaction
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Risk Service: Listens to transaction.created
+  # events, scores risk, publishes transaction.flagged
+  # for high-risk transactions.
+  risk:
+    build: ./services/risk
+    container_name: risk
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://chaosmend:chaosmend_secret@postgres:5432/chaosmend
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SERVICE_NAME: risk
+      RISK_THRESHOLD: "1000"
+
+  # Notification Service: Listens to
+  # transaction.flagged and logs alerts.
+  # (In prod this would send emails/SMS/Slack.)
+  notification:
+    build: ./services/notification
+    container_name: notification
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SERVICE_NAME: notification
+
+  # Analytics Service: Reads aggregated metrics
+  # from Postgres; the ML layer polls this.
+  analytics:
+    build: ./services/analytics
+    container_name: analytics
+    networks: [chaosmend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8004:8004"
+    environment:
+      DATABASE_URL: postgresql://chaosmend:chaosmend_secret@postgres:5432/chaosmend
+      SERVICE_NAME: analytics
+
+  # ──────────────────────────────────────────
+  # INTELLIGENCE LAYER
+  # ──────────────────────────────────────────
+
+  # Chaos Agent: Deliberately breaks things.
+  # Exposes POST /api/v1/chaos/trigger.
+  # Needs Docker socket so it can stop/pause
+  # other containers directly.
+  chaos-agent:
+    build: ./chaos_agent
+    container_name: chaos-agent
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8005:8005"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      # Mount Docker socket so chaos-agent can
+      # control sibling containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ML Anomaly Detector: Uses Isolation Forest
+  # and Prophet to flag unusual behaviour.
+  # Queries both analytics (business metrics) and
+  # Prometheus (system metrics: CPU, memory, request
+  # rate, error rate, latency, Kafka consumer lag).
+  anomaly-detector:
+    build: ./ml
+    container_name: anomaly-detector
+    networks: [chaosmend]
+    depends_on:
+      - analytics
+      - prometheus
+    ports:
+      - "8006:8006"
+    environment:
+      ANALYTICS_URL: http://analytics:8004
+      PROMETHEUS_URL: http://prometheus:9090
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://chaosmend:chaosmend_secret@postgres:5432/chaosmend
+
+  # Self-Healing Agent: Consumes anomaly.detected from Kafka
+  # (primary) and polls the anomaly detector REST API (fallback).
+  # Selects recovery actions via Q-learning, executes via Docker SDK,
+  # verifies success after 120s, updates Q-table, and publishes
+  # outcomes to the healing.actions Kafka topic.
+  # Circuit breaker prevents infinite restart loops.
+  healing-agent:
+    build: ./healing_agent
+    container_name: healing-agent
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      anomaly-detector:
+        condition: service_started
+    ports:
+      - "8007:8007"
+    environment:
+      ANOMALY_DETECTOR_URL: http://anomaly-detector:8006
+      PROMETHEUS_URL: http://prometheus:9090
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://chaosmend:chaosmend_secret@postgres:5432/chaosmend
+      POLL_INTERVAL_SECONDS: "30"
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ──────────────────────────────────────────
+  # MONITORING LAYER
+  # ──────────────────────────────────────────
+
+  # cAdvisor: Exposes per-container CPU, memory,
+  # and network stats to Prometheus.
+  # The ML anomaly detector queries these to detect
+  # resource exhaustion (memory leaks, CPU spikes).
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: cadvisor
+    networks: [chaosmend]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8090:8080"
+    privileged: true
+
+  # kafka-exporter: Exposes Kafka consumer group lag
+  # metrics to Prometheus. High consumer lag on
+  # transaction.created = notification/risk service is falling behind.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kafka-exporter
+    networks: [chaosmend]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    command:
+      - "--kafka.server=kafka:9092"
+    restart: on-failure
+
+  # Prometheus: Scrapes /metrics from every
+  # service every 15s and stores time-series data.
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    networks: [chaosmend]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+
+  # Grafana: Connects to Prometheus and shows
+  # beautiful real-time dashboards.
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    networks: [chaosmend]
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
