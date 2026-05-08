@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# macOS
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Test cache
+.pytest_cache/
+
+# ML artifacts
+*.pkl
+*.joblib
+*.h5
+*.pt
+
+# Monitoring runtime data
+monitoring/grafana/data/
+monitoring/prometheus/data/
+
+# Claude worktrees
+.claude/worktrees/
